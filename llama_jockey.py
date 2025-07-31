@@ -156,14 +156,14 @@ class DatabaseManager:
         self.cursor.execute("SELECT id, timestamp, model, parameters, ttft_ms, tps, total_tokens, total_time_s, quality_score FROM benchmarks ORDER BY timestamp DESC")
         return self.cursor.fetchall()
 
-    def get_optimal_setting(self, objective):
+    def get_optimal_setting_for_model(self, model_name, objective):
         if objective == "Maximize TPS":
-            query = "SELECT * FROM benchmarks WHERE tps IS NOT NULL ORDER BY tps DESC LIMIT 1"
+            query = "SELECT * FROM benchmarks WHERE model = ? AND tps IS NOT NULL ORDER BY tps DESC LIMIT 1"
         elif objective == "Minimize TTFT":
-            query = "SELECT * FROM benchmarks WHERE ttft_ms IS NOT NULL AND ttft_ms > 0 ORDER BY ttft_ms ASC LIMIT 1"
+            query = "SELECT * FROM benchmarks WHERE model = ? AND ttft_ms IS NOT NULL AND ttft_ms > 0 ORDER BY ttft_ms ASC LIMIT 1"
         else:
             return None
-        self.cursor.execute(query)
+        self.cursor.execute(query, (model_name,))
         return self.cursor.fetchone()
 
     def get_rating(self, model_name):
@@ -207,12 +207,11 @@ class DatabaseManager:
 
     def clear_all_data(self):
         """Drops all tables and recreates them."""
-        self.cursor.execute("DROP TABLE IF EXISTS benchmarks")
-        self.cursor.execute("DROP TABLE IF EXISTS arena_battles")
-        self.cursor.execute("DROP TABLE IF EXISTS model_ratings")
-        self.cursor.execute("DROP TABLE IF EXISTS prompts")
-        self.conn.commit()
-        self.setup_tables()
+        self.conn.close()
+        if os.path.exists(self.db_name):
+            os.remove(self.db_name)
+        self.__init__(self.db_name)
+
 
     def close(self):
         self.conn.close()
@@ -269,6 +268,7 @@ class LlamaJockeyApp(tk.Tk):
         self.arena_model_a = tk.StringVar()
         self.arena_model_b = tk.StringVar()
         self.jockeys_edge_objective = tk.StringVar(value="Maximize TPS")
+        self.jockeys_edge_model = tk.StringVar()
         
         self.param_temperature = tk.StringVar(value="0.7")
         self.param_num_ctx = tk.StringVar(value="2048")
@@ -288,6 +288,13 @@ class LlamaJockeyApp(tk.Tk):
         self.is_generating = False
         self.is_in_arena_battle = False
         
+        self.model_menu = None
+        self.prompt_model_menu = None
+        self.analysis_model_menu = None
+        self.arena_model_a_menu = None
+        self.arena_model_b_menu = None
+        self.jockeys_edge_model_menu = None
+
         self.current_telemetry = {}
         self.ollama_client = OllamaClient(self.ollama_server.get())
         self.style = ttk.Style(self)
@@ -333,7 +340,7 @@ class LlamaJockeyApp(tk.Tk):
         main_frame = ttk.Frame(self.benchmark_tab, padding="10")
         main_frame.pack(expand=True, fill="both")
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(3, weight=1)
+        main_frame.rowconfigure(2, weight=1)
 
         controls_frame = ttk.LabelFrame(main_frame, text="Test Configuration")
         controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10), padx=5)
@@ -376,19 +383,8 @@ class LlamaJockeyApp(tk.Tk):
         ttk.OptionMenu(param_frame, self.param_mmap, "Default", "Default", "Enabled", "Disabled").grid(row=4, column=1, padx=5, pady=2, sticky="w")
         ttk.Button(param_frame, text="Help with Parameters", command=self.show_help_window).grid(row=4, column=3, padx=5, pady=5, sticky="e")
         
-        edge_frame = ttk.LabelFrame(main_frame, text="Jockey's Edge Recommender")
-        edge_frame.grid(row=2, column=0, sticky="ew", pady=(0,10), padx=5)
-        edge_frame.columnconfigure(2, weight=1)
-
-        ttk.Label(edge_frame, text="Optimization Goal:").pack(side="left", padx=5, pady=5)
-        objectives = ["Maximize TPS", "Minimize TTFT"]
-        ttk.OptionMenu(edge_frame, self.jockeys_edge_objective, objectives[0], *objectives).pack(side="left", padx=5, pady=5)
-        ttk.Button(edge_frame, text="Find Optimal Setting", command=self.run_jockeys_edge_analysis).pack(side="left", padx=5, pady=5)
-        self.jockeys_edge_result = scrolledtext.ScrolledText(edge_frame, wrap=tk.WORD, height=4, state="disabled")
-        self.jockeys_edge_result.pack(side="left", expand=True, fill="x", padx=5, pady=5)
-
         results_frame = ttk.LabelFrame(main_frame, text="Benchmark Log")
-        results_frame.grid(row=3, column=0, sticky="nsew", padx=5)
+        results_frame.grid(row=2, column=0, sticky="nsew", padx=5)
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
         
@@ -454,14 +450,29 @@ class LlamaJockeyApp(tk.Tk):
         main_frame = ttk.Frame(self.analysis_tab, padding="10")
         main_frame.pack(expand=True, fill="both")
         main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
+        main_frame.rowconfigure(2, weight=1) # Adjusted for jockey's edge
+
+        edge_frame = ttk.LabelFrame(main_frame, text="Jockey's Edge Recommender")
+        edge_frame.grid(row=0, column=0, sticky="ew", pady=(0,10), padx=5)
+        edge_frame.columnconfigure(2, weight=1)
+
+        ttk.Label(edge_frame, text="Model:").pack(side="left", padx=5, pady=5)
+        self.jockeys_edge_model_menu = ttk.OptionMenu(edge_frame, self.jockeys_edge_model, "Select Model")
+        self.jockeys_edge_model_menu.pack(side="left", padx=5, pady=5)
+
+        ttk.Label(edge_frame, text="Optimization Goal:").pack(side="left", padx=5, pady=5)
+        objectives = ["Maximize TPS", "Minimize TTFT"]
+        ttk.OptionMenu(edge_frame, self.jockeys_edge_objective, objectives[0], *objectives).pack(side="left", padx=5, pady=5)
+        ttk.Button(edge_frame, text="Find Optimal Setting", command=self.run_jockeys_edge_analysis).pack(side="left", padx=5, pady=5)
+        self.jockeys_edge_result = scrolledtext.ScrolledText(edge_frame, wrap=tk.WORD, height=4, state="disabled")
+        self.jockeys_edge_result.pack(side="left", expand=True, fill="x", padx=5, pady=5)
 
         if not MATPLOTLIB_AVAILABLE:
             ttk.Label(main_frame, text="Matplotlib is not installed. Please run 'pip install matplotlib' to enable charting.", style="Error.TLabel").pack(pady=20)
             return
 
         controls_frame = ttk.LabelFrame(main_frame, text="Chart Configuration")
-        controls_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        controls_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
         ttk.Label(controls_frame, text="Model:").pack(side="left", padx=5, pady=5)
         self.analysis_model_menu = ttk.OptionMenu(controls_frame, self.analysis_model, "Select Model")
@@ -478,7 +489,7 @@ class LlamaJockeyApp(tk.Tk):
         ttk.Button(controls_frame, text="Generate Chart", command=self.generate_analysis_chart).pack(side="left", padx=20, pady=5)
         
         self.chart_frame = ttk.Frame(main_frame)
-        self.chart_frame.grid(row=1, column=0, sticky="nsew")
+        self.chart_frame.grid(row=2, column=0, sticky="nsew")
         self.chart_canvas = None
 
     def generate_analysis_chart(self):
@@ -802,23 +813,26 @@ class LlamaJockeyApp(tk.Tk):
             (self.model_menu, self.selected_model),
             (self.prompt_model_menu, self.selected_model),
             (self.analysis_model_menu, self.analysis_model),
+            (self.jockeys_edge_model_menu, self.jockeys_edge_model),
             (self.arena_model_a_menu, self.arena_model_a),
             (self.arena_model_b_menu, self.arena_model_b)
         ]
 
         for menu, _ in menu_var_map:
-            if hasattr(self, menu.winfo_name().replace("!optionmenu", "")):
+            if menu:
                 menu['menu'].delete(0, 'end')
 
         if models:
             model_names = [m['name'] for m in models]
             if model_names:
                 for menu, var in menu_var_map:
-                    for name in model_names:
-                        menu['menu'].add_command(label=name, command=lambda v=name, s_var=var: s_var.set(v))
+                    if menu:
+                        for name in model_names:
+                            menu['menu'].add_command(label=name, command=lambda v=name, s_var=var: s_var.set(v))
                 
                 self.selected_model.set(model_names[0])
                 self.analysis_model.set(model_names[0])
+                self.jockeys_edge_model.set(model_names[0])
                 self.arena_model_a.set(model_names[0])
                 self.arena_model_b.set(model_names[1] if len(model_names) > 1 else model_names[0])
             else:
@@ -1219,14 +1233,17 @@ class LlamaJockeyApp(tk.Tk):
     
     def run_jockeys_edge_analysis(self):
         objective = self.jockeys_edge_objective.get()
-        result = self.db.get_optimal_setting(objective)
+        model = self.jockeys_edge_model.get()
+
+        if not self.is_model_selected(self.jockeys_edge_model, "Jockey's Edge"): return
+        
+        result = self.db.get_optimal_setting_for_model(model, objective)
         
         self.clear_and_enable_widget(self.jockeys_edge_result)
 
         if result:
             recommendation = (
-                f"Optimal setting for '{objective}':\n"
-                f"  - Model: {result[2]}\n"
+                f"Optimal setting for '{model}' to '{objective}':\n"
                 f"  - Parameters: {result[3]}\n"
                 f"  - Achieved TPS: {result[5]:.2f}\n"
                 f"  - Achieved TTFT: {result[4]:.2f} ms\n"
@@ -1234,7 +1251,7 @@ class LlamaJockeyApp(tk.Tk):
             )
             self.log_to_widget(self.jockeys_edge_result, recommendation)
         else:
-            self.log_to_widget(self.jockeys_edge_result, "No benchmark data found for this objective. Please run some tests first.")
+            self.log_to_widget(self.jockeys_edge_result, f"No benchmark data found for '{model}' and objective '{objective}'. Please run some tests first.")
 
 
     def export_benchmarks(self, format_type):
